@@ -1,0 +1,15 @@
+Here is a list of the datasets selected to create the baseline to be update via the API
+
+CANDIDATE MASTER (cn.txt) 2025-26 - downloaded May 3rd 2026
+CANDIDATE MASTER HEADER FILE (cn_header_file.csv) - downlaoded May 3rd 2026
+COMMITTE MASTER (cm.txt) 2025-26 - downlaoded May 3rd 2026
+COMMITTE MASTER HEADER FILE (cm_header_file.csv) - downloaded May 3rd 2026
+CANDIDATE-COMMITTEE LINKAGES (ccl.txt) 2025-26 - downloaded May 3rd 2026
+CANDIDATE-COMMITTEE LINKAGES HEADER FILE (ccl_header_file.csv) - downloaded May 3rd 2026
+CONTRIBUTIONS BY INDIVIDUALS 2025-26 (itcont.txt) - downloaded May 3rd 2026
+CONTRIBUTIONS BY INDIVIDUALS HEADER FILE (indiv-header_file.txt) - downloaded May 3rd 2026
+ANY TRANSACTION FROM ONE COMMITTEE TO ANOTHER 2025-26 (itoth.txt ) - downloaded May 3rd 2026
+ANY TRANSACTION FROM ONE COMMITTEE TO ANOTHER HEADER FILE (oth_header_file.csv ) - downloaded May 3rd 2026
+CONTRIBUTIONS FORM COMMITTEES TO CANDIDATES & INDEPENDENT EXPENDITURES 2025-26 (itpas2.txt) - downloaded May 3rd 2026
+CONTRIBUTIONS FORM COMMITTEES TO CANDIDATES & INDEPENDENT EXPENDITURES HEADER FILE (pas2_header_file.csv) - downloaded May 3rd 2026
+PAC & PARTY SUMMARY 2025-26 (webk26.txt) - downloaded May 3rd 2026 NO HEADER
