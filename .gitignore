@@ -1,0 +1,14 @@
+# Ignore environment variable configuration files containing secret keys
+.env
+
+# Ignore Python virtual environments
+venv/
+.venv/
+env/
+
+# Ignore temporary OS files
+.DS_Store
+Thumbs.db
+
+Bulk download/
+Old/

@@ -1,0 +1,7 @@
+minio
+pandas
+pyarrow
+requests
+python-dotenv
+duckdb
+openpyxl

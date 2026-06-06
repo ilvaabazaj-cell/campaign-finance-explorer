@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: fec_data_lake_minio
+    ports:
+      - "9000:9000"  # API Port (used by Python/DuckDB)
+      - "9001:9001"  # Console Port (used by your browser)
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    # This command tells MinIO to store data in the /data folder and serves the UI on port 9001
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+volumes:
+  minio_data:
