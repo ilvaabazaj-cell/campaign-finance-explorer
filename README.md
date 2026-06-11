@@ -62,5 +62,12 @@ _python step2_api_ingest.py_
 
 (This contacts the live OpenFEC API, securely processes pages of raw JSON data using your .env key, and stores the incremental nightly data into your MinIO storage.)
 
+Process and Standardize the Silver Layer:
+
+_python step3_silver_layer.py_
+
+(This runs the data cleaning and standardization pipeline using a native MinIO client. It automatically matches raw data sources, converts fields names, standardizes all date fields to the ISO format YYYY-MM-DD, drops transaction duplicates based on sub_id, and outputs optimized, uniform consolidated files into the silver/ directory.)
+
+
 **Before closing the computer**
 Whenever you are done working for the day, you can turn off the storage containers by running docker compose down in your terminal so it doesn't use your laptop's battery or RAM in the background! Everything will be perfectly saved for next time.
