@@ -29,7 +29,10 @@ def main():
     # 3. Define mapping of the sample files to upload and process
     fec_files = {
         "cn_sample.txt": "cn_header_file.csv",
-        "cm_sample.txt": "cm_header_file.csv"
+        "cm_sample.txt": "cm_header_file.csv",
+        "indiv_sample.txt": "indiv_header_file.csv",
+        "pas2_sample.txt": "pas2_header_file.csv",
+        "oth_sample.txt": "oth_header_file.csv"
     }
 
     local_seed_dir = "data_seed"

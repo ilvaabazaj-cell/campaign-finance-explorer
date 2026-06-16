@@ -5,3 +5,6 @@ requests
 python-dotenv
 duckdb
 openpyxl
+python-dotenv 
+deltalake==0.15.0 
+pyspark==3.5.1

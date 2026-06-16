@@ -26,7 +26,7 @@ BRONZE_PREFIX = "bronze/"
 SILVER_PREFIX = "silver/"
 
 # ==========================================
-# MAPPING DICTIONARIES (Full 7 Datasets Set)
+# MAPPING DICTIONARIES
 # ==========================================
 MAPPINGS = {
     "committee_master": {
@@ -53,6 +53,10 @@ MAPPINGS = {
         "bulk": {"CMTE_ID": "com_id", "CAND_ID": "cand_id", "TRANSACTION_PGI": "election_type", "TRANSACTION_TP": "trans_type", "ENTITY_TP": "entity_tp", "NAME": "entity_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id", "SUB_ID": "sub_id"},
         "api": {"committee_id": "com_id", "candidate_id": "cand_id", "election_type": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "recipient_name": "entity_name", "recipient_city": "contrib_city", "recipient_state": "contrib_state", "recipient_zip": "contrib_zip", "disbursement_date": "trans_date", "disbursement_amount": "trans_amt", "recipient_committee_id": "other_com_id", "transaction_id": "sub_id"}
     },
+    "independent_expenditures": {
+        "bulk": {"CMTE_ID": "com_id", "CAND_ID": "cand_id", "TRANSACTION_TP": "trans_type", "NAME": "entity_name", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "SUB_ID": "sub_id"},
+        "api": {"committee_id": "com_id", "candidate_id": "cand_id", "transaction_type": "trans_type", "payee_name": "entity_name", "expenditure_date": "trans_date", "expenditure_amount": "trans_amt", "transaction_id": "sub_id"}
+    },
     "pac_summary": {
         "bulk": {"CMTE_ID": "com_id", "CMTE_NM": "com_name", "TTL_RECEIPTS": "total_receipts", "INDV_CONTRIB": "total_indv_contrib", "OTHER_POL_CMTE_CONTRIB": "total_pac_contrib", "TTL_DISB": "total_disbursements", "COH_COP": "cash_on_hand", "IND_EXP": "independent_exp", "NET_CONTRIB": "net_contrib", "CVG_END_DT": "coverage_end_date"},
         "api": {"committee_id": "com_id", "receipts": "total_receipts", "individual_itemized_contributions": "total_indv_contrib", "other_political_committee_contributions": "total_pac_contrib", "disbursements": "total_disbursements", "cash_on_hand_end_period": "cash_on_hand", "independent_expenditures": "independent_exp", "net_contributions": "net_contrib", "coverage_end_date": "coverage_end_date"}
@@ -60,7 +64,7 @@ MAPPINGS = {
 }
 
 def load_df_from_minio(file_path):
-    """Detects file format in Bronze and loads it using the native Minio client."""
+    """Loads file from MinIO safely."""
     try:
         response = minio_client.get_object(BUCKET_NAME, file_path)
         data_bytes = response.read()
@@ -72,9 +76,8 @@ def load_df_from_minio(file_path):
         elif file_path.endswith(".json"):
             return pd.read_json(io.BytesIO(data_bytes))
         else:
-            return pd.read_csv(io.BytesIO(data_bytes), sep="|", on_bad_lines='skip')
-    except Exception as e:
-        print(f"⚠️ Bulk file not found or unreadable: {file_path}")
+            return pd.read_csv(io.BytesIO(data_bytes), sep="|", on_bad_lines='skip', dtype=str)
+    except Exception:
         return None
 
 def find_latest_api_file(prefix_search):
@@ -89,22 +92,28 @@ def find_latest_api_file(prefix_search):
     return None
 
 def normalize_dates(series):
-    """Synchronizes dates into a single standard YYYY-MM-DD format."""
-    series = series.astype(str).str.split('.').str[0].str.strip()
+    """Type-safe normalization of variant dates to standard YYYY-MM-DD format."""
+    series = series.fillna("").astype(str).str.split('.').str[0].str.strip()
+    
     def parse_row(val):
+        if not val or val.lower() in ['none', 'nan', 'nat', '<na>']:
+            return pd.NaT
         if len(val) == 8 and val.isdigit():
             return pd.to_datetime(val, format='%m%d%Y', errors='coerce')
         return pd.to_datetime(val, errors='coerce')
-    return series.apply(parse_row).dt.strftime('%Y-%m-%d')
+        
+    return pd.to_datetime(series.apply(parse_row)).dt.strftime('%Y-%m-%d')
 
 def process_layer(dataset_name, bulk_filename, api_search_pattern):
-    print(f"\n⚙️ Normalizing dataset: {dataset_name}")
+    print(f"\n🔄 Normalizing dataset: {dataset_name}")
     dfs = []
     
     # 1. Load Bulk data
     df_bulk = load_df_from_minio(f"{BRONZE_PREFIX}{bulk_filename}")
     if df_bulk is not None:
         df_bulk = df_bulk.rename(columns=MAPPINGS[dataset_name]["bulk"])
+        # Deduplicate internal columns if any bulk schema fields overlapped
+        df_bulk = df_bulk.loc[:, ~df_bulk.columns.duplicated()].copy()
         df_bulk = df_bulk[[c for c in MAPPINGS[dataset_name]["bulk"].values() if c in df_bulk.columns]].copy()
         df_bulk['data_source'] = 'bulk'
         dfs.append(df_bulk)
@@ -115,7 +124,12 @@ def process_layer(dataset_name, bulk_filename, api_search_pattern):
         print(f"🔍 Found latest API file: {api_filename}")
         df_api = load_df_from_minio(api_filename)
         if df_api is not None:
+            for col in df_api.columns:
+                if df_api[col].dtype == object:
+                    df_api[col] = df_api[col].astype(str).str.replace(r"[\[\]']", "", regex=True)
+            
             df_api = df_api.rename(columns=MAPPINGS[dataset_name]["api"])
+            df_api = df_api.loc[:, ~df_api.columns.duplicated()].copy()
             df_api = df_api[[c for c in MAPPINGS[dataset_name]["api"].values() if c in df_api.columns]].copy()
             df_api['data_source'] = 'api'
             dfs.append(df_api)
@@ -146,31 +160,44 @@ def process_layer(dataset_name, bulk_filename, api_search_pattern):
         if col not in master_df.columns:
             master_df[col] = None
 
-    # 6. Upload into Silver Layer
-    output_key = f"{SILVER_PREFIX}{dataset_name}.parquet"
-    buffer = io.BytesIO()
-    master_df.to_parquet(buffer, index=False)
-    file_size = buffer.tell()
-    buffer.seek(0)
+    # 6. Upload into Silver Layer as a Delta Table
+    output_dir = f"s3://{BUCKET_NAME}/{SILVER_PREFIX}{dataset_name}"
     
-    minio_client.put_object(
-        BUCKET_NAME, 
-        output_key, 
-        data=buffer, 
-        length=file_size,
-        content_type="application/octet-stream"
-    )
-    print(f"✨ [SILVER LAYER] Successfully created: {output_key} ({len(master_df)} rows)")
+    storage_options = {
+        "aws_endpoint_url": f"http://{minio_endpoint}",
+        "aws_access_key_id": MINIO_ACCESS_KEY,
+        "aws_secret_access_key": MINIO_SECRET_KEY,
+        "aws_allow_http": "true", 
+        "aws_s3_allow_unsafe_rename": "true" 
+    }
 
+    try:
+        from deltalake import write_deltalake
+        
+        print(f"📦 Writing Delta table to {output_dir}...")
+        write_deltalake(
+            table_or_uri=output_dir,
+            data=master_df,
+            mode="overwrite", 
+            storage_options=storage_options
+        )
+        print(f"✨ [SILVER LAYER] Successfully created/updated Delta table: {output_dir} ({len(master_df)} rows)")
+        
+    except Exception as e:
+        print(f"❌ Failed to write Delta table for {dataset_name}: {e}")
+
+# ==========================================
+# RESTORED RUNTIME ENTRY POINT
+# ==========================================
 if __name__ == "__main__":
-    # Standardized task list matching your team's file naming patterns
     pipeline_tasks = [
         ("committee_master", "cm_sample.parquet", "api_raw_committees"),
         ("candidate_master", "cn_sample.parquet", "api_raw_candidates"),
-        ("individual_contributions", "indiv_sample.parquet", "api_raw_individual"),
+        ("individual_contributions", "indiv_sample.parquet", "api_raw_individual_contribs"),
         ("candidate_committee_linkages", "link_sample.parquet", "api_raw_linkages"),
-        ("inter_committee_transactions", "itcont_sample.parquet", "api_raw_inter_committee"),
-        ("committee_contributions_to_candidates", "pas2_sample.parquet", "api_raw_cmte_contrib"),
+        ("inter_committee_transactions", "oth_sample.parquet", "api_raw_inter_committee"), 
+        ("committee_contributions_to_candidates", "pas2_sample.parquet", "api_raw_committee_disbursements"),
+        ("independent_expenditures", "oth_sample.parquet", "api_raw_independent_expenditures"),
         ("pac_summary", "webk_sample.parquet", "api_raw_pac_summary")
     ]
     
