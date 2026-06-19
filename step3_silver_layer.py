@@ -1,5 +1,6 @@
 import os
 import io
+import duckdb
 import pandas as pd
 from minio import Minio
 from dotenv import load_dotenv
@@ -22,186 +23,210 @@ minio_client = Minio(
 )
 
 BUCKET_NAME = "data"
-BRONZE_PREFIX = "bronze/"
+LOCAL_BRONZE_DIR = os.path.join("minio_data", "data", "bronze")
 SILVER_PREFIX = "silver/"
 
-# ==========================================
-# MAPPING DICTIONARIES
-# ==========================================
 MAPPINGS = {
     "committee_master": {
         "bulk": {"CMTE_ID": "com_id", "CMTE_NM": "com_name", "CMTE_CITY": "com_city", "CMTE_ST": "com_state", "CMTE_ZIP": "com_zip", "CMTE_DSGN": "com_design", "CMTE_TP": "com_type", "CMTE_PTY_AFFILIATION": "com_party", "CAND_ID": "cand_id"},
-        "api": {"committee_id": "com_id", "name": "com_name", "designated_agent_state": "com_state", "designated_agent_zip": "com_zip", "designation": "com_design", "committee_type": "com_type", "party": "com_party", "candidate_ids": "cand_id"}
+        "api": {"committee_id": "com_id", "name": "com_name", "designation_full": "com_design", "committee_type_full": "com_type", "party_full": "com_party", "candidate_ids": "cand_id"}
     },
     "candidate_master": {
         "bulk": {"CAND_ID": "cand_id", "CAND_NAME": "cand_name", "CAND_PTY_AFFILIATION": "cand_party", "CAND_ELECTION_YR": "cand_el_yr", "CAND_OFFICE_ST": "cand_off_state", "CAND_OFFICE": "cand_off", "CAND_PCC": "com_id"},
-        "api": {"candidate_id": "cand_id", "name": "cand_name", "party": "cand_party", "election_years": "cand_el_yr", "state": "cand_off_state", "office": "cand_off", "committee_id": "com_id"}
+        "api": {"candidate_id": "cand_id", "name": "cand_name", "party_full": "cand_party", "election_years": "cand_el_yr", "state": "cand_off_state", "office_full": "cand_off", "principal_committees": "com_id"}
     },
     "individual_contributions": {
         "bulk": {"CMTE_ID": "com_id", "TRANSACTION_PGI": "election_type", "NAME": "contrib_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "EMPLOYER": "contrib_emp", "OCCUPATION": "contrib_occ", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id"},
-        "api": {"committee_id": "com_id", "election_type": "election_type", "contributor_name": "contrib_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contributor_employer": "contrib_emp", "contributor_occupation": "contrib_occ", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt"}
+        "api": {"committee_id": "com_id", "election_type_full": "election_type", "contributor_name": "contrib_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contributor_employer": "contrib_emp", "contributor_occupation": "contrib_occ", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt", "contributor_id": "other_com_id"}
     },
     "candidate_committee_linkages": {
         "bulk": {"CAND_ID": "cand_id", "CAND_ELECTION_YR": "cand_el_yr", "FEC_ELECTION_YR": "fec_el_yr", "CMTE_ID": "com_id", "CMTE_TP": "com_type", "CMTE_DSGN": "com_design"},
-        "api": {"candidate_id": "cand_id", "election_year": "cand_el_yr", "cycles": "fec_el_yr", "committee_id": "com_id", "committee_type": "com_type", "designation": "com_design"}
+        "api": {"candidate_id": "cand_id", "election_year": "cand_el_yr", "cycles": "fec_el_yr", "committee_id": "com_id", "committee_type_full": "com_type", "designation_full": "com_design"}
     },
     "inter_committee_transactions": {
         "bulk": {"CMTE_ID": "com_id", "TRANSACTION_PGI": "election_type", "TRANSACTION_TP": "trans_type", "ENTITY_TP": "entity_tp", "NAME": "entity_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id", "SUB_ID": "sub_id"},
-        "api": {"committee_id": "com_id", "election_type": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "contributor_name": "entity_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt", "contributor_id": "other_com_id", "transaction_id": "sub_id"}
+        "api": {"committee_id": "com_id", "election_type_full": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "contributor_name": "entity_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt", "contributor_id": "other_com_id", "transaction_id": "sub_id"}
     },
     "committee_contributions_to_candidates": {
         "bulk": {"CMTE_ID": "com_id", "CAND_ID": "cand_id", "TRANSACTION_PGI": "election_type", "TRANSACTION_TP": "trans_type", "ENTITY_TP": "entity_tp", "NAME": "entity_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id", "SUB_ID": "sub_id"},
-        "api": {"committee_id": "com_id", "candidate_id": "cand_id", "election_type": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "recipient_name": "entity_name", "recipient_city": "contrib_city", "recipient_state": "contrib_state", "recipient_zip": "contrib_zip", "disbursement_date": "trans_date", "disbursement_amount": "trans_amt", "recipient_committee_id": "other_com_id", "transaction_id": "sub_id"}
+        "api": {"committee_id": "com_id", "candidate_id": "cand_id", "election_type_full": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "recipient_name": "entity_name", "recipient_city": "contrib_city", "recipient_state": "contrib_state", "recipient_zip": "contrib_zip", "disbursement_date": "trans_date", "disbursement_amount": "trans_amt", "recipient_committee_id": "other_com_id", "transaction_id": "sub_id"}
     },
     "independent_expenditures": {
-        "bulk": {"CMTE_ID": "com_id", "CAND_ID": "cand_id", "TRANSACTION_TP": "trans_type", "NAME": "entity_name", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "SUB_ID": "sub_id"},
-        "api": {"committee_id": "com_id", "candidate_id": "cand_id", "transaction_type": "trans_type", "payee_name": "entity_name", "expenditure_date": "trans_date", "expenditure_amount": "trans_amt", "transaction_id": "sub_id"}
+        "bulk": {"CMTE_ID": "com_id", "TRANSACTION_PGI": "election_type", "TRANSACTION_TP": "trans_type", "ENTITY_TP": "entity_tp", "NAME": "entity_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id", "SUB_ID": "sub_id"},
+        "api": {"committee_id": "com_id", "election_type_full": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "contributor_name": "entity_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt", "contributor_id": "other_com_id", "transaction_id": "sub_id"}
     },
     "pac_summary": {
-        "bulk": {"CMTE_ID": "com_id", "CMTE_NM": "com_name", "TTL_RECEIPTS": "total_receipts", "INDV_CONTRIB": "total_indv_contrib", "OTHER_POL_CMTE_CONTRIB": "total_pac_contrib", "TTL_DISB": "total_disbursements", "COH_COP": "cash_on_hand", "IND_EXP": "independent_exp", "NET_CONTRIB": "net_contrib", "CVG_END_DT": "coverage_end_date"},
-        "api": {"committee_id": "com_id", "receipts": "total_receipts", "individual_itemized_contributions": "total_indv_contrib", "other_political_committee_contributions": "total_pac_contrib", "disbursements": "total_disbursements", "cash_on_hand_end_period": "cash_on_hand", "independent_expenditures": "independent_exp", "net_contributions": "net_contrib", "coverage_end_date": "coverage_end_date"}
+        "bulk": {"CMTE_ID": "com_id", "TTL_RECEIPTS": "total_receipts", "INDV_CONTRIB": "total_indv_contrib", "OTHER_POL_CMTE_CONTRIB": "total_pac_contrib", "TTL_DISB": "total_disbursements", "COH_COP": "cash_on_hand", "IND_EXP": "independent_exp", "NET_CONTRIB": "net_contrib", "CVG_END_DT": "coverage_end_date"},
+        "api": {"committee_id": "com_id", "committee_name": "com_name", "receipts": "total_receipts", "individual_itemized_contributions": "total_indv_contrib", "other_political_committee_contributions": "total_pac_contrib", "disbursements": "total_disbursements", "cash_on_hand_end_period": "cash_on_hand", "independent_expenditures": "independent_exp", "net_contributions": "net_contrib", "coverage_end_date": "coverage_end_date"}
     }
 }
 
-def load_df_from_minio(file_path):
-    """Loads file from MinIO safely."""
-    try:
-        response = minio_client.get_object(BUCKET_NAME, file_path)
-        data_bytes = response.read()
-        response.close()
-        response.release_conn()
-        
-        if file_path.endswith(".parquet"):
-            return pd.read_parquet(io.BytesIO(data_bytes))
-        elif file_path.endswith(".json"):
-            return pd.read_json(io.BytesIO(data_bytes))
-        else:
-            return pd.read_csv(io.BytesIO(data_bytes), sep="|", on_bad_lines='skip', dtype=str)
-    except Exception:
-        return None
+HEADER_MAPS = {
+    "cm.txt": "data_seed/cm_header_file.csv",
+    "cn.txt": "data_seed/cn_header_file.csv",
+    "itcont.txt": "data_seed/indiv_header_file.csv",
+    "itoth.txt": "data_seed/oth_header_file.csv",
+    "itpas2.txt": "data_seed/pas2_header_file.csv"
+}
 
-def find_latest_api_file(prefix_search):
-    """Finds the most recent timestamped API file in the MinIO bucket."""
-    try:
-        objects = minio_client.list_objects(BUCKET_NAME, prefix=f"{BRONZE_PREFIX}incoming_api/", recursive=True)
-        matching_files = [obj.object_name for obj in objects if prefix_search in obj.object_name]
-        if matching_files:
-            return sorted(matching_files)[-1]
-    except Exception:
-        pass
-    return None
-
-def normalize_dates(series):
-    """Type-safe normalization of variant dates to standard YYYY-MM-DD format."""
-    series = series.fillna("").astype(str).str.split('.').str[0].str.strip()
+def process_dataset(dataset_name, bulk_filename, api_prefix):
+    print(f"\n⚙️ Processing layer unification for: [{dataset_name}]")
     
-    def parse_row(val):
-        if not val or val.lower() in ['none', 'nan', 'nat', '<na>']:
-            return pd.NaT
-        if len(val) == 8 and val.isdigit():
-            return pd.to_datetime(val, format='%m%d%Y', errors='coerce')
-        return pd.to_datetime(val, errors='coerce')
-        
-    return pd.to_datetime(series.apply(parse_row)).dt.strftime('%Y-%m-%d')
-
-def process_layer(dataset_name, bulk_filename, api_search_pattern):
-    print(f"\n🔄 Normalizing dataset: {dataset_name}")
-    dfs = []
+    bulk_path = os.path.join(LOCAL_BRONZE_DIR, bulk_filename)
+    output_filename = f"{dataset_name}_clean.parquet"
+    local_temp_path = os.path.join(os.getcwd(), output_filename)
     
-    # 1. Load Bulk data
-    df_bulk = load_df_from_minio(f"{BRONZE_PREFIX}{bulk_filename}")
-    if df_bulk is not None:
-        df_bulk = df_bulk.rename(columns=MAPPINGS[dataset_name]["bulk"])
-        # Deduplicate internal columns if any bulk schema fields overlapped
-        df_bulk = df_bulk.loc[:, ~df_bulk.columns.duplicated()].copy()
-        df_bulk = df_bulk[[c for c in MAPPINGS[dataset_name]["bulk"].values() if c in df_bulk.columns]].copy()
-        df_bulk['data_source'] = 'bulk'
-        dfs.append(df_bulk)
-        
-    # 2. Find and load latest API file
-    api_filename = find_latest_api_file(api_search_pattern)
-    if api_filename:
-        print(f"🔍 Found latest API file: {api_filename}")
-        df_api = load_df_from_minio(api_filename)
-        if df_api is not None:
-            for col in df_api.columns:
-                if df_api[col].dtype == object:
-                    df_api[col] = df_api[col].astype(str).str.replace(r"[\[\]']", "", regex=True)
+    con = duckdb.connect(database=':memory:')
+    
+    # Identify the full target universe of columns mapped for this specific model
+    bulk_map = MAPPINGS[dataset_name]["bulk"]
+    api_map = MAPPINGS[dataset_name]["api"]
+    all_target_columns = sorted(list(set(list(bulk_map.values()) + list(api_map.values()))))
+
+    # -------------------------------------------------------------------------
+    # STEP A: DUCKDB PARSING ENGINE FOR BULK DATA
+    # -------------------------------------------------------------------------
+    has_bulk = False
+    if os.path.exists(bulk_path):
+        header_file = HEADER_MAPS.get(bulk_filename)
+        if header_file and os.path.exists(header_file):
+            header_df = pd.read_csv(header_file, nrows=0)
+            columns = header_df.columns.tolist()
             
-            df_api = df_api.rename(columns=MAPPINGS[dataset_name]["api"])
-            df_api = df_api.loc[:, ~df_api.columns.duplicated()].copy()
-            df_api = df_api[[c for c in MAPPINGS[dataset_name]["api"].values() if c in df_api.columns]].copy()
-            df_api['data_source'] = 'api'
-            dfs.append(df_api)
-    else:
-        print(f"⚠️ No API files found matching pattern: {api_search_pattern}")
+            # Map columns explicitly; fill missing ones with NULL to align schemas
+            select_items = []
+            for target_col in all_target_columns:
+                # Find matching raw historical column name
+                matched_source = [k for k, v in bulk_map.items() if v == target_col and k in columns]
+                if matched_source:
+                    select_items.append(f"\"{matched_source[0]}\" AS {target_col}")
+                else:
+                    select_items.append(f"CAST(NULL AS VARCHAR) AS {target_col}")
+            
+            select_clause = ", ".join(select_items)
+            
+            print(f"   📥 Streaming massive file natively via DuckDB: {bulk_path}")
+            try:
+                con.execute(f"""
+                    CREATE VIEW bulk_raw_view AS 
+                    SELECT {select_clause} FROM read_csv('{bulk_path}', 
+                                           sep='|', 
+                                           header=False, 
+                                           names={columns}, 
+                                           all_varchar=True,
+                                           parallel=True)
+                """)
+                has_bulk = True
+                cnt = con.execute("SELECT count(*) FROM bulk_raw_view").fetchone()[0]
+                print(f"   ✅ DuckDB registered {cnt} raw historical records in-view.")
+            except Exception as e:
+                print(f"   ⚠️ DuckDB bulk extraction skipped/failed: {e}")
+        else:
+            print(f"   ⚠️ Header file mapping missing for {bulk_filename}.")
+            
+    # -------------------------------------------------------------------------
+    # STEP B: LOAD INCREMENTAL API LIVE UPDATE LOGS
+    # -------------------------------------------------------------------------
+    df_api = pd.DataFrame()
+    try:
+        objects = minio_client.list_objects(BUCKET_NAME, prefix="bronze/incoming_api/", recursive=True)
+        api_files = [obj.object_name for obj in objects if api_prefix in obj.object_name]
+        
+        api_dfs = []
+        for file_name in api_files:
+            response = minio_client.get_object(BUCKET_NAME, file_name)
+            parquet_data = io.BytesIO(response.read())
+            api_dfs.append(pd.read_parquet(parquet_data))
+            
+        if api_dfs:
+            df_api = pd.concat(api_dfs, ignore_index=True)
+            print(f"   📥 Ingested {len(df_api)} real-time incremental records from MinIO.")
+    except Exception as e:
+        print(f"   ℹ️ No live API increments located for prefix '{api_prefix}': {e}")
 
-    if not dfs:
-        print(f"❌ No source data found in Bronze for {dataset_name}. Skipping.")
+    has_api = False
+    if not df_api.empty:
+        # Build matching data structure using Pandas to keep code cleanly structured
+        df_api_aligned = pd.DataFrame()
+        for target_col in all_target_columns:
+            matched_source = [k for k, v in api_map.items() if v == target_col and k in df_api.columns]
+            if matched_source:
+                df_api_aligned[target_col] = df_api[matched_source[0]].astype(str)
+            else:
+                df_api_aligned[target_col] = None
+                
+        con.register('api_raw_df', df_api_aligned)
+        has_api = True
+
+    # -------------------------------------------------------------------------
+    # STEP C: UNIFY, CLEAN & EXPORT DATA DIRECTLY FROM DUCKDB DISK ENGINE
+    # -------------------------------------------------------------------------
+    if not has_bulk and not has_api:
+        print(f"   ❌ Cancelled pipeline for {dataset_name}: No source inputs available.")
         return
 
-    # 3. Consolidation
-    master_df = pd.concat(dfs, ignore_index=True)
-
-    # 4. Date Cleaning
-    for date_col in ['trans_date', 'coverage_end_date']:
-        if date_col in master_df.columns:
-            master_df[date_col] = normalize_dates(master_df[date_col])
-
-    # 5. Deduplication
-    if 'sub_id' in master_df.columns:
-        master_df = master_df.sort_values(by='data_source', ascending=False)
-        master_df = master_df.drop_duplicates(subset=['sub_id'], keep='first')
+    # Columns match exactly now, preventing any binder configuration failure
+    if has_bulk and has_api:
+        union_query = "SELECT * FROM bulk_raw_view UNION ALL SELECT * FROM api_raw_df"
+    elif has_bulk:
+        union_query = "SELECT * FROM bulk_raw_view"
     else:
-        cols_to_check = [c for c in master_df.columns if c != 'data_source']
-        master_df = master_df.drop_duplicates(subset=cols_to_check, keep='first')
+        union_query = "SELECT * FROM api_raw_df"
 
-    for col in MAPPINGS[dataset_name]["bulk"].values():
-        if col not in master_df.columns:
-            master_df[col] = None
-
-    # 6. Upload into Silver Layer as a Delta Table
-    output_dir = f"s3://{BUCKET_NAME}/{SILVER_PREFIX}{dataset_name}"
+    con.execute(f"CREATE VIEW unified_raw AS {union_query}")
     
-    storage_options = {
-        "aws_endpoint_url": f"http://{minio_endpoint}",
-        "aws_access_key_id": MINIO_ACCESS_KEY,
-        "aws_secret_access_key": MINIO_SECRET_KEY,
-        "aws_allow_http": "true", 
-        "aws_s3_allow_unsafe_rename": "true" 
-    }
+    select_clean_items = []
+    for c in all_target_columns:
+        if c == "trans_date":
+            select_clean_items.append("""
+                CASE 
+                    WHEN trans_date LIKE '%-%' THEN strftime(strptime(trans_date, '%Y-%m-%d'), '%Y-%m-%d')
+                    WHEN length(regexp_replace(trans_date, '[^0-9]', '', 'g')) = 8 THEN strftime(strptime(trans_date, '%m%d%Y'), '%Y-%m-%d')
+                    ELSE NULL 
+                END AS trans_date
+            """)
+        elif c == "trans_amt":
+            select_clean_items.append("COALESCE(CAST(trans_amt AS DOUBLE), 0.0) AS trans_amt")
+        else:
+            select_clean_items.append(f"COALESCE(CAST(\"{c}\" AS VARCHAR), '') AS \"{c}\"")
 
+    select_clean_clause = ", ".join(select_clean_items)
+
+    print("   🛡️ Unifying schemas and executing deduplication out-of-core...")
+    
+    con.execute(f"""
+        COPY (
+            SELECT DISTINCT {select_clean_clause} FROM unified_raw
+        ) TO '{local_temp_path}' (FORMAT PARQUET, COMPRESSION 'SNAPPY')
+    """)
+
+    # -------------------------------------------------------------------------
+    # STEP D: COMMIT TO MINIO FOR USER INTERFACE DISPLAY
+    # -------------------------------------------------------------------------
     try:
-        from deltalake import write_deltalake
+        minio_silver_path = f"{SILVER_PREFIX}{dataset_name}/{output_filename}"
+        minio_client.fput_object(BUCKET_NAME, minio_silver_path, local_temp_path)
         
-        print(f"📦 Writing Delta table to {output_dir}...")
-        write_deltalake(
-            table_or_uri=output_dir,
-            data=master_df,
-            mode="overwrite", 
-            storage_options=storage_options
-        )
-        print(f"✨ [SILVER LAYER] Successfully created/updated Delta table: {output_dir} ({len(master_df)} rows)")
+        final_count = con.execute(f"SELECT count(*) FROM read_parquet('{local_temp_path}')").fetchone()[0]
+        print(f"   ✨ [SILVER LAYER SUCCESS]: Uploaded model to {BUCKET_NAME}/{minio_silver_path} ({final_count} rows)")
         
+        if os.path.exists(local_temp_path):
+            os.remove(local_temp_path)
+            
     except Exception as e:
-        print(f"❌ Failed to write Delta table for {dataset_name}: {e}")
+        print(f"   ❌ Failed to commit silver dataset: {e}")
 
-# ==========================================
-# RESTORED RUNTIME ENTRY POINT
-# ==========================================
 if __name__ == "__main__":
     pipeline_tasks = [
-        ("committee_master", "cm_sample.parquet", "api_raw_committees"),
-        ("candidate_master", "cn_sample.parquet", "api_raw_candidates"),
-        ("individual_contributions", "indiv_sample.parquet", "api_raw_individual_contribs"),
-        ("candidate_committee_linkages", "link_sample.parquet", "api_raw_linkages"),
-        ("inter_committee_transactions", "oth_sample.parquet", "api_raw_inter_committee"), 
-        ("committee_contributions_to_candidates", "pas2_sample.parquet", "api_raw_committee_disbursements"),
-        ("independent_expenditures", "oth_sample.parquet", "api_raw_independent_expenditures"),
-        ("pac_summary", "webk_sample.parquet", "api_raw_pac_summary")
+        ("committee_master", "cm.txt", "api_raw_committees"),
+        ("candidate_master", "cn.txt", "api_raw_candidates"),
+        ("individual_contributions", "itcont.txt", "api_raw_individual_contribs"),
+        ("inter_committee_transactions", "itoth.txt", "api_raw_inter_committee"), 
+        ("committee_contributions_to_candidates", "itpas2.txt", "api_raw_committee_disbursements"),
+        ("independent_expenditures", "itpas2.txt", "api_raw_independent_expenditures")
     ]
     
-    print("🚀 Starting the Universal Silver Layer cleaning pipeline...")
-    for dataset, bulk, api_pattern in pipeline_tasks:
-        process_layer(dataset, bulk, api_pattern)
-    print("\n🏁 The Silver Layer pipeline execution has finished!")
+    print("🚀 Starting the Memory-Isolated DuckDB Silver Layer Pipeline...")
+    for dataset_name, bulk_file, api_prefix in pipeline_tasks:
+        process_dataset(dataset_name, bulk_file, api_prefix)
+    print("\n🏁 Universal Silver Layer Execution Completed successfully!")

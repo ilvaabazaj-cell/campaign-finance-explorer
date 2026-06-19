@@ -13,7 +13,5 @@ services:
     # This command tells MinIO to store data in the /data folder and serves the UI on port 9001
     command: server /data --console-address ":9001"
     volumes:
-      - minio_data:/data
-
-volumes:
-  minio_data:
+      # CHANGED HERE: Added './' to make it a local directory bind mount
+      - ./minio_data:/data

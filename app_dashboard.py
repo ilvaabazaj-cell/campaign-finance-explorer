@@ -31,7 +31,7 @@ EDGE_TYPE_LABELS = {
     "independent_expenditure": "PAC Independent Spending (Advertisements/Support)"
 }
 
-# 4. Cached Data Ingestion Helpers
+# 4. Cached Data Ingestion Helpers (Optimized)
 @st.cache_data
 def load_parquet_from_minio(prefix, filename):
     """Streams a Parquet file from a given prefix directory in MinIO into memory."""
@@ -44,54 +44,67 @@ def load_parquet_from_minio(prefix, filename):
     except Exception:
         return pd.DataFrame()
 
-# Load Gold Insights
+# Load Masters first to build lightning fast index mapping series
+df_cand_master = load_parquet_from_minio("silver/candidate_master/", "candidate_master_clean.parquet")
+df_cmte_master = load_parquet_from_minio("silver/committee_master/", "committee_master_clean.parquet")
+
+# Build lightning fast vector maps
+# Build lightning fast vector maps (Deduplicated to prevent InvalidIndexError)
+id_to_name_series = pd.Series(dtype='str')
+
+if not df_cand_master.empty:
+    # Ensure unique mappings by dropping duplicate IDs
+    df_cand_clean_mapping = df_cand_master.drop_duplicates(subset=['cand_id'])
+    cand_series = pd.Series(df_cand_clean_mapping['cand_name'].values, index=df_cand_clean_mapping['cand_id'])
+    id_to_name_series = pd.concat([id_to_name_series, cand_series])
+
+if not df_cmte_master.empty:
+    # Ensure unique mappings by dropping duplicate IDs
+    df_cmte_clean_mapping = df_cmte_master.drop_duplicates(subset=['com_id'])
+    cmte_series = pd.Series(df_cmte_clean_mapping['com_name'].values, index=df_cmte_clean_mapping['com_id'])
+    # Combine them, keeping the first instance if a candidate and committee share an ID
+    id_to_name_series = id_to_name_series.combine_first(cmte_series)
+
+# Final safety check: remove any unexpected duplicate indices that survived the merge
+id_to_name_series = id_to_name_series[~id_to_name_series.index.duplicated(keep='first')]
+
+# Pre-load core metrics frameworks
 df_edges = load_parquet_from_minio("gold/", "network_edges.parquet")
-df_nodes = load_parquet_from_minio("gold/", "network_nodes_centrality.parquet")
 df_velocity = load_parquet_from_minio("gold/", "temporal_spending_velocity.parquet")
 df_sectors = load_parquet_from_minio("gold/", "donor_concentration_by_sector.parquet")
 
-# Load Silver Metadata Tables to translate IDs back to Real Names
-df_cand_master = load_parquet_from_minio("silver/", "candidate_master.parquet")
-df_cmte_master = load_parquet_from_minio("silver/", "committee_master.parquet")
-
-# Build name-to-id mapping dictionaries dynamically
-cand_map = {}
-if not df_cand_master.empty:
-    # Ensure columns exist, standardizing to keys mapped in your Silver layer script
-    c_id_col = 'cand_id' if 'cand_id' in df_cand_master.columns else 'CAND_ID'
-    c_nm_col = 'cand_name' if 'cand_name' in df_cand_master.columns else 'CAND_NAME'
-    if c_id_col in df_cand_master.columns and c_nm_col in df_cand_master.columns:
-        cand_map = pd.Series(df_cand_master[c_id_col].values, index=df_cand_master[c_nm_col]).to_dict()
-
-cmte_map = {}
-if not df_cmte_master.empty:
-    m_id_col = 'com_id' if 'com_id' in df_cmte_master.columns else 'CMTE_ID'
-    m_nm_col = 'com_name' if 'com_name' in df_cmte_master.columns else 'CMTE_NM'
-    if m_id_col in df_cmte_master.columns and m_nm_col in df_cmte_master.columns:
-        cmte_map = pd.Series(df_cmte_master[m_id_col].values, index=df_cmte_master[m_nm_col]).to_dict()
-
-# Reverse lookups for printing nice human-readable tables
-id_to_name_map = {**{v: k for k, v in cand_map.items()}, **{v: k for k, v in cmte_map.items()}}
-
-def translate_id(entity_id):
-    """Gracefully returns the name of an ID, or the ID itself if name is missing."""
-    return id_to_name_map.get(entity_id, entity_id)
+# Map names using native vectorized mappings (100x faster than .apply loops)
+if not df_edges.empty:
+    df_edges['source_name'] = df_edges['source'].map(id_to_name_series).fillna(df_edges['source'])
+    df_edges['target_name'] = df_edges['target'].map(id_to_name_series).fillna(df_edges['target'])
 
 # --- UI HEADER ---
 st.title("🇺🇸 Campaign Capital Flow Explorer")
-st.markdown("Welcome! This system tracks how money travels across American political campaigns. You don't need to know technical finance rules or tracking IDs to discover trends—use the simple controls below to audit political spending.")
+st.markdown("Select a target candidate or committee in the sidebar to dynamically generate targeted insights without slowing down your browser.")
 st.markdown("---")
 
-# --- GLOBAL SUMMARY STATS ---
+# --- GLOBAL SIDEBAR FILTERING (MANDATORY ENTITY SELECTION) ---
+st.sidebar.header("🔍 Targeted Capital Auditor")
+
 if not df_edges.empty:
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Political Capital Tracked", f"${df_edges['weight'].sum():,.2f}", help="Total dollar value across all processed transactions.")
-    with col2:
-        anomalies = df_velocity['velocity_anomaly_flag'].sum() if not df_velocity.empty else 0
-        st.metric("High-Risk Spending Surges Detected", f"{anomalies}", delta="Requires Review" if anomalies > 0 else "Stable")
-    with col3:
-        st.metric("Active Political Entities Mapped", f"{len(df_nodes):,}")
+    # Gather distinct names that actually have transaction records
+    all_known_names = sorted(list(set(df_edges['source_name'].dropna()).union(set(df_edges['target_name'].dropna()))))
+    
+    # Force user to pick an entity - No massive global defaults
+    filter_name = st.sidebar.selectbox("Select Target Entity to Audit", all_known_names, index=0)
+else:
+    st.sidebar.error("No transactional network data found in Gold layer.")
+    st.stop()
+
+# --- DYNAMIC SUMMARY STATS FOR SELECTED ENTITY ---
+entity_edges = df_edges[(df_edges['source_name'] == filter_name) | (df_edges['target_name'] == filter_name)]
+total_capital = entity_edges['weight'].sum()
+
+col1, col2 = st.columns(2)
+with col1:
+    st.metric(f"Total Tracked Volume for Selected Entity", f"${total_capital:,.2f}")
+with col2:
+    st.metric("Associated Connections", f"{len(entity_edges)}")
 
 # --- DASHBOARD TABS ---
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -102,67 +115,44 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 # =========================================================================
-# TAB 1: PIPELINE FLOW TRACKER (Sankey แทน Network Graph)
+# TAB 1: PIPELINE FLOW TRACKER (Sankey Graph Engine - Capped at Top 20)
 # =========================================================================
 with tab1:
-    st.header("Money Pipeline Explorer")
+    st.header(f"Flow Networks for: {filter_name}")
     
-    with st.expander("💡 How to Read This Analysis (Click to Expand)"):
-        st.markdown("""
-        **What is this showing?** Instead of confusing network maps, this graph shows money moving sequentially from **Senders (Left)** to **Receivers (Right)**. The thickness of each flowing band indicates the volume of cash.
+    raw_edge_type = st.selectbox("Select Flow Channel to Inspect", list(EDGE_TYPE_LABELS.keys()), format_func=lambda x: EDGE_TYPE_LABELS[x])
+    filtered_by_type = entity_edges[entity_edges['edge_type'] == raw_edge_type]
+    
+    if not filtered_by_type.empty:
+        # Sort and isolate only the Top 20 records to keep rendering instant
+        plot_df = filtered_by_type.sort_values(by='weight', ascending=False).head(20).copy()
+        st.caption(f"Showing the top {len(plot_df)} largest financial connections to prevent canvas freezing.")
         
-        **How to interact:**
-        1. Select a transaction type from the dropdown box.
-        2. Adjust the slider to filter out minor entries and expose the dominant "mega-donors" or largest recipient pipelines.
-        3. Hover your cursor over any block or stream to view exact dollar counts and transaction quantities.
-        """)
-
-    if not df_edges.empty:
-        # User choices using clean labels
-        raw_edge_type = st.selectbox("Select Flow Channel to Inspect", list(EDGE_TYPE_LABELS.keys()), format_func=lambda x: EDGE_TYPE_LABELS[x])
+        all_nodes = list(set(plot_df['source_name']).union(set(plot_df['target_name'])))
+        node_indices = {name: i for i, name in enumerate(all_nodes)}
         
-        # Slicing threshold
-        filtered_by_type = df_edges[df_edges['edge_type'] == raw_edge_type]
-        min_amt = st.slider("Filter out transactions below this amount ($)", 
-                            float(filtered_by_type['weight'].min()), 
-                            float(filtered_by_type['weight'].quantile(0.99) if len(filtered_by_type) > 100 else filtered_by_type['weight'].max()), 
-                            float(filtered_by_type['weight'].median()))
+        source_indices = plot_df['source_name'].map(node_indices).tolist()
+        target_indices = plot_df['target_name'].map(node_indices).tolist()
+        weights = plot_df['weight'].tolist()
         
-        plot_df = filtered_by_type[filtered_by_type['weight'] >= min_amt].copy()
+        fig_sankey = go.Figure(data=[go.Sankey(
+            node = dict(
+              pad = 15, thickness = 20,
+              line = dict(color = "black", width = 0.5),
+              label = all_nodes,
+              color = "#1f77b4"
+            ),
+            link = dict(
+              source = source_indices,
+              target = target_indices,
+              value = weights,
+              hovertemplate = 'Source: %{source.label}<br />Target: %{target.label}<br />Total Transferred: $% {value:,.2f}<extra></extra>'
+          ))])
         
-        if not plot_df.empty:
-            # Humanize IDs to Names for Display Node Blocks
-            plot_df['source_name'] = plot_df['source'].apply(translate_id)
-            plot_df['target_name'] = plot_df['target'].apply(translate_id)
-            
-            # Construct distinct list of unique names indexed for Plotly's Sankey engine
-            all_nodes = list(set(plot_df['source_name']).union(set(plot_df['target_name'])))
-            node_indices = {name: i for i, name in enumerate(all_nodes)}
-            
-            # Map sources/targets to integer indices
-            source_indices = plot_df['source_name'].map(node_indices).tolist()
-            target_indices = plot_df['target_name'].map(node_indices).tolist()
-            weights = plot_df['weight'].tolist()
-            
-            # Build the Sankey Flow Graph Object
-            fig_sankey = go.Figure(data=[go.Sankey(
-                node = dict(
-                  pad = 15, thickness = 20,
-                  line = dict(color = "black", width = 0.5),
-                  label = all_nodes,
-                  color = "#3182bd"
-                ),
-                link = dict(
-                  source = source_indices,
-                  target = target_indices,
-                  value = weights,
-                  hovertemplate = 'Source: %{source.label}<br />Target: %{target.label}<br />Total Money Transferred: $% {value:,.2f}<extra></extra>'
-              ))])
-            
-            fig_sankey.update_layout(title_text="Orderly Breakdown of Capital Pipelines", font_size=11, height=600)
-            st.plotly_chart(fig_sankey, use_container_width=True)
-        else:
-            st.warning("No financial streams matched this filter threshold. Lower the slider value.")
+        fig_sankey.update_layout(font_size=11, height=500)
+        st.plotly_chart(fig_sankey, use_container_width=True)
+    else:
+        st.warning(f"No connections found for '{filter_name}' under this specific flow channel.")
 
 # =========================================================================
 # TAB 2: HIGH-RISK SPENDING SPIKES
@@ -170,152 +160,125 @@ with tab1:
 with tab2:
     st.header("Anomalous Spending Velocity Tracker")
     
-    with st.expander("💡 How to Read This Analysis (Click to Expand)"):
-        st.markdown("""
-        **What is this showing?** Political campaigns usually spend money at a steady, predictable pace. This tool monitors spending timelines and flags **abnormal spikes** where spending suddenly leaps more than 2.5 standard deviations above its 7-day average baseline.
+    if not df_velocity.empty:
+        # Vectorized translation for quick lookup
+        df_velocity['cmte_name'] = df_velocity['com_id'].map(id_to_name_series).fillna(df_velocity['com_id'])
         
-        **Why does it matter?** Massive, uncharacteristic flash-spending events near voting deadlines often indicate last-minute negative ad campaigns or hidden defense strategies.
-        
-        **How to interact:** Select a political committee from the list (sorted alphabetically by their official organization name). If a red warning triggers, review the log table below the graph to inspect the spike date.
-        """)
-
-    if not df_velocity.empty and cmte_map:
-        # Filter down velocity items to committees whose names are mapped in our lookup system
-        df_velocity['cmte_name'] = df_velocity['com_id'].apply(translate_id)
-        available_cmtes = sorted(df_velocity['cmte_name'].unique())
-        
-        selected_cmte_name = st.selectbox("Choose a Committee Name to Audit", available_cmtes)
-        selected_cmte_id = cmte_map.get(selected_cmte_name, selected_cmte_name)
-        
-        com_timeline = df_velocity[df_velocity['com_id'] == selected_cmte_id].sort_values('trans_date')
+        # Check if the chosen entity is a committee in this table
+        com_timeline = df_velocity[df_velocity['cmte_name'] == filter_name].sort_values('trans_date')
         
         if not com_timeline.empty:
-            fig_time = px.line(com_timeline, x="trans_date", y="trans_amt", 
-                               title=f"Daily spending trajectory for: {selected_cmte_name}",
-                               labels={"trans_date": "Date of Operation", "trans_amt": "Cash Spent ($)"},
-                               template="plotly_white", line_shape="linear")
+            fig_time = px.line(com_timeline, x="trans_date", y="daily_amt" if "daily_amt" in com_timeline.columns else "trans_amt", 
+                               title=f"Daily spending trajectory for: {filter_name}",
+                               labels={"trans_date": "Date of Operation", "trans_amt": "Cash Spent ($)", "daily_amt": "Cash Spent ($)"},
+                               template="plotly_white")
             
-            # Isolate the data entries carrying the anomaly warning flag
             flags = com_timeline[com_timeline['velocity_anomaly_flag'] == 1]
             if not flags.empty:
-                st.error(f"🚨 FRAUD/RISK DETECTOR: {selected_cmte_name} triggered {len(flags)} unusual flash-spending spikes!")
-                
-                # Overlay bright red alert triangles on top of our timeline
-                fig_time.add_scatter(x=flags['trans_date'], y=flags['trans_amt'],
+                st.error(f"🚨 FRAUD/RISK DETECTOR: {filter_name} triggered {len(flags)} unusual flash-spending spikes!")
+                fig_time.add_scatter(x=flags['trans_date'], y=flags['daily_amt'] if "daily_amt" in flags.columns else flags['trans_amt'],
                                      mode='markers', marker=dict(color='red', size=12, symbol='triangle-up'),
                                      name='Statistically Abnormal Surge')
                 
-                # Show explicit clean table
-                st.dataframe(flags[['trans_date', 'trans_amt', 'rolling_7d_avg']].rename(
-                    columns={'trans_date': 'Spike Date', 'trans_amt': 'Abnormal Amount Spent', 'rolling_7d_avg': 'Normal 7-Day Baseline Avg'}
+                st.dataframe(flags[['trans_date', 'daily_amt', 'rolling_7d_avg']].rename(
+                    columns={'trans_date': 'Spike Date', 'daily_amt': 'Abnormal Amount Spent', 'rolling_7d_avg': 'Normal 7-Day Baseline Avg'}
                 ), use_container_width=True)
             else:
                 st.success("✅ Clean Record: This committee's spending patterns conform entirely to normal baselines.")
                 
             st.plotly_chart(fig_time, use_container_width=True)
+        else:
+            st.info("The selected entity is either a candidate or has no documented daily timeline records.")
 
 # =========================================================================
 # TAB 3: CORPORATE & EMPLOYER BLOCS
 # =========================================================================
 with tab3:
     st.header("Employer Funding Coalitions")
-    
-    with st.expander("💡 How to Read This Analysis (Click to Expand)"):
-        st.markdown("""
-        **What is this showing?** By law, individual donors must declare their employer. This chart stacks individual contributions together by **Employer Name** to highlight coordinated financial support bases.
-        
-        **Why does it matter?** If a massive cluster of donations originates from executives or employees at a single corporate entity or tech company, it signals an institutional funding bloc.
-        """)
 
     if not df_sectors.empty:
         df_sectors_clean = df_sectors.copy()
-        df_sectors_clean['Target Committee Name'] = df_sectors_clean['com_id'].apply(translate_id)
-        
-        # Clean up missing or unprovided text values
+        df_sectors_clean['Target Committee Name'] = df_sectors_clean['com_id'].map(id_to_name_series).fillna(df_sectors_clean['com_id'])
         df_sectors_clean['contrib_emp'] = df_sectors_clean['contrib_emp'].replace(['None', 'nan', ''], 'NOT SPECIFIED')
         
-        top_blocs = df_sectors_clean.groupby('contrib_emp')['total_funding'].sum().reset_index()
-        top_blocs = top_blocs[top_blocs['contrib_emp'] != 'NOT SPECIFIED'].sort_values('total_funding', ascending=False).head(10)
+        # Isolate to selected committee
+        df_sectors_clean = df_sectors_clean[df_sectors_clean['Target Committee Name'] == filter_name]
         
-        col_b1, col_b2 = st.columns([1, 1])
-        with col_b1:
-            st.markdown("**Top 10 Most Powerful Employer Blocs ($)**")
-            fig_blocs = px.bar(top_blocs, x='total_funding', y='contrib_emp', orientation='h',
-                               labels={'total_funding': 'Total Capital Contributed ($)', 'contrib_emp': 'Donor Employer'},
-                               color='total_funding', color_continuous_scale='teal', template='plotly_white')
-            fig_blocs.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
-            st.plotly_chart(fig_blocs, use_container_width=True)
+        if not df_sectors_clean.empty:
+            top_blocs = df_sectors_clean.groupby('contrib_emp')['total_funding'].sum().reset_index()
+            top_blocs = top_blocs[top_blocs['contrib_emp'] != 'NOT SPECIFIED'].sort_values('total_funding', ascending=False).head(10)
             
-        with col_b2:
-            st.markdown("**Complete Donor Cohort Ledger**")
-            st.dataframe(df_sectors_clean[['contrib_emp', 'Target Committee Name', 'total_funding', 'distinct_donors']].rename(
-                columns={'contrib_emp': 'Funder Employer', 'total_funding': 'Total Funds', 'distinct_donors': 'Unique Core Donors'}
-            ), use_container_width=True, height=380, hide_index=True)
+            col_b1, col_b2 = st.columns([1, 1])
+            with col_b1:
+                st.markdown("**Top 10 Most Powerful Employer Blocs ($)**")
+                fig_blocs = px.bar(top_blocs, x='total_funding', y='contrib_emp', orientation='h',
+                                   labels={'total_funding': 'Total Capital Contributed ($)', 'contrib_emp': 'Donor Employer'},
+                                   color='total_funding', color_continuous_scale='teal', template='plotly_white')
+                fig_blocs.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
+                st.plotly_chart(fig_blocs, use_container_width=True)
+                
+            with col_b2:
+                st.markdown("**Complete Donor Cohort Ledger**")
+                st.dataframe(df_sectors_clean[['contrib_emp', 'total_funding', 'distinct_donors']].rename(
+                    columns={'contrib_emp': 'Funder Employer', 'total_funding': 'Total Funds', 'distinct_donors': 'Unique Core Donors'}
+                ), use_container_width=True, height=380, hide_index=True)
+        else:
+            st.warning("No sector employment mappings listed for this specific group.")
 
 # =========================================================================
 # TAB 4: GEOGRAPHIC MONEY MAP
 # =========================================================================
 with tab4:
     st.header("Geographic Campaign Capital Breakdown")
-    
-    with st.expander("💡 How to Read This Analysis (Click to Expand)"):
-        st.markdown("""
-        **What is this showing?** This interactive US map charts **where political action committees are physically located and spending money from**. 
-        
-        **Why does it matter?** Elections are local, but campaign finance is national. This view helps you track if local campaigns are powered by home-state citizens or financed by political committees located in remote capital hubs (like Washington D.C., Virginia, or California).
-        
-        **How to interact:** Hover over any state to reveal total active capital outflows coming out of that state's boundaries.
-        """)
 
-    # We map spending concentrations by looking at the official state locations of committees 
-    # that are generating independent expenditures or direct candidate disbursements.
-    df_silver_exp = load_parquet_from_minio("silver/", "independent_expenditures.parquet")
-    df_silver_cmte = load_parquet_from_minio("silver/", "committee_master.parquet")
+    df_silver_exp = load_parquet_from_minio("silver/independent_expenditures/", "independent_expenditures_clean.parquet")
+    df_silver_cmte = load_parquet_from_minio("silver/committee_master/", "committee_master_clean.parquet")
     
     if not df_silver_exp.empty and not df_silver_cmte.empty:
-        # Standardize join keys
         exp_com_col = 'com_id' if 'com_id' in df_silver_exp.columns else 'CMTE_ID'
         exp_amt_col = 'trans_amt' if 'trans_amt' in df_silver_exp.columns else 'TRANSACTION_AMT'
         
         cmte_id_col = 'com_id' if 'com_id' in df_silver_cmte.columns else 'CMTE_ID'
         cmte_st_col = 'com_state' if 'com_state' in df_silver_cmte.columns else 'CMTE_ST'
         
-        # Clean data type configurations
         df_silver_exp[exp_amt_col] = pd.to_numeric(df_silver_exp[exp_amt_col], errors='coerce').fillna(0.0)
         df_silver_cmte[cmte_st_col] = df_silver_cmte[cmte_st_col].astype(str).str.upper().str.strip()
         
-        # Link records together to inherit geographic attributes
-        geo_spend = pd.merge(df_silver_exp, df_silver_cmte[[cmte_id_col, cmte_st_col]], left_on=exp_com_col, right_on=cmte_id_col, how='inner')
+        # Filter down records to just our selected committee before running the merge join
+        df_silver_cmte['com_name'] = df_silver_cmte[cmte_id_col].map(id_to_name_series).fillna(df_silver_cmte[cmte_id_col])
+        selected_cmte_ids = df_silver_cmte[df_silver_cmte['com_name'] == filter_name][cmte_id_col].unique()
         
-        # Group together state totals
-        state_totals = geo_spend.groupby(cmte_st_col)[exp_amt_col].sum().reset_index()
-        state_totals.columns = ['state_code', 'total_expenditures']
+        df_exp_filtered = df_silver_exp[df_silver_exp[exp_com_col].isin(selected_cmte_ids)]
         
-        # Filter down data framework to legitimate 50 US State postal abbreviations
-        us_states = ["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
-                     "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
-                     "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY", "DC"]
-        state_totals = state_totals[state_totals['state_code'].isin(us_states)]
-        
-        if not state_totals.empty:
-            # Build Choropleth Graph Map Object
-            fig_map = px.choropleth(
-                state_totals,
-                locations='state_code',
-                locationmode="USA-states",
-                color='total_expenditures',
-                scope="usa",
-                color_continuous_scale="Reds",
-                labels={'total_expenditures': 'Total Capital Expended ($)'},
-                title="Total Campaign Capital Outflow Distribution by State"
-            )
+        if not df_exp_filtered.empty:
+            geo_spend = pd.merge(df_exp_filtered, df_silver_cmte[[cmte_id_col, cmte_st_col]], left_on=exp_com_col, right_on=cmte_id_col, how='inner')
+            state_totals = geo_spend.groupby(cmte_st_col)[exp_amt_col].sum().reset_index()
+            state_totals.columns = ['state_code', 'total_expenditures']
             
-            fig_map.update_layout(
-                geo=dict(bgcolor='rgba(0,0,0,0)', lakecolor='rgb(255, 255, 255)'),
-                height=600
-            )
-            st.plotly_chart(fig_map, use_container_width=True)
+            us_states = ["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
+                         "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
+                         "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY", "DC"]
+            state_totals = state_totals[state_totals['state_code'].isin(us_states)]
+            
+            if not state_totals.empty:
+                fig_map = px.choropleth(
+                    state_totals,
+                    locations='state_code',
+                    locationmode="USA-states",
+                    color='total_expenditures',
+                    scope="usa",
+                    color_continuous_scale="Reds",
+                    labels={'total_expenditures': 'Total Capital Expended ($)'},
+                    title=f"Campaign Spending Outflow Origin Map for: {filter_name}"
+                )
+                fig_map.update_layout(
+                    geo=dict(bgcolor='rgba(0,0,0,0)', lakecolor='rgb(255, 255, 255)'),
+                    height=500
+                )
+                st.plotly_chart(fig_map, use_container_width=True)
+            else:
+                st.info("No expenditures matched legitimate state postal codes.")
         else:
-            st.info("Insufficient structured geo-location elements found in current sample dataset to display map data.")
+            st.info("No recorded spatial expenditure actions exist for this selected entity.")
     else:
-        st.info("Ingest bulk files containing committee location states to initialize the geospatial map module.")
+        st.info("Geospatial infrastructure indexes are loading...")
