@@ -39,10 +39,10 @@ MAPPINGS = {
         "bulk": {"CMTE_ID": "com_id", "TRANSACTION_PGI": "election_type", "NAME": "contrib_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "EMPLOYER": "contrib_emp", "OCCUPATION": "contrib_occ", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id"},
         "api": {"committee_id": "com_id", "election_type_full": "election_type", "contributor_name": "contrib_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contributor_employer": "contrib_emp", "contributor_occupation": "contrib_occ", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt", "contributor_id": "other_com_id"}
     },
-    "candidate_committee_linkages": {
-        "bulk": {"CAND_ID": "cand_id", "CAND_ELECTION_YR": "cand_el_yr", "FEC_ELECTION_YR": "fec_el_yr", "CMTE_ID": "com_id", "CMTE_TP": "com_type", "CMTE_DSGN": "com_design"},
-        "api": {"candidate_id": "cand_id", "election_year": "cand_el_yr", "cycles": "fec_el_yr", "committee_id": "com_id", "committee_type_full": "com_type", "designation_full": "com_design"}
-    },
+    #"candidate_committee_linkages": {
+     #   "bulk": {"CAND_ID": "cand_id", "CAND_ELECTION_YR": "cand_el_yr", "FEC_ELECTION_YR": "fec_el_yr", "CMTE_ID": "com_id", "CMTE_TP": "com_type", "CMTE_DSGN": "com_design"},
+      #  "api": {"candidate_id": "cand_id", "election_year": "cand_el_yr", "cycles": "fec_el_yr", "committee_id": "com_id", "committee_type_full": "com_type", "designation_full": "com_design"}
+    #},
     "inter_committee_transactions": {
         "bulk": {"CMTE_ID": "com_id", "TRANSACTION_PGI": "election_type", "TRANSACTION_TP": "trans_type", "ENTITY_TP": "entity_tp", "NAME": "entity_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id", "SUB_ID": "sub_id"},
         "api": {"committee_id": "com_id", "election_type_full": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "contributor_name": "entity_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt", "contributor_id": "other_com_id", "transaction_id": "sub_id"}
@@ -110,11 +110,11 @@ def process_dataset(dataset_name, bulk_filename, api_prefix):
                 con.execute(f"""
                     CREATE VIEW bulk_raw_view AS 
                     SELECT {select_clause} FROM read_csv('{bulk_path}', 
-                                           sep='|', 
-                                           header=False, 
-                                           names={columns}, 
-                                           all_varchar=True,
-                                           parallel=True)
+                                                           sep='|', 
+                                                           header=False, 
+                                                           names={columns}, 
+                                                           all_varchar=True,
+                                                           parallel=True)
                 """)
                 has_bulk = True
                 cnt = con.execute("SELECT count(*) FROM bulk_raw_view").fetchone()[0]
@@ -187,6 +187,12 @@ def process_dataset(dataset_name, bulk_filename, api_prefix):
             """)
         elif c == "trans_amt":
             select_clean_items.append("COALESCE(CAST(trans_amt AS DOUBLE), 0.0) AS trans_amt")
+        elif c in ["cand_id", "com_id", "other_com_id", "sub_id"]:
+            # Data Quality: Rimozione spazi e formattazione rigorosa degli ID
+            select_clean_items.append(f"TRIM(UPPER(COALESCE(CAST(\"{c}\" AS VARCHAR), ''))) AS \"{c}\"")
+        elif c == "contrib_emp":
+            # Normalizzazione forte per i datori di lavoro (RIMOZIONE DOPPIONI E SPAZI)
+            select_clean_items.append(f"TRIM(UPPER(COALESCE(CAST(\"{c}\" AS VARCHAR), 'NOT SPECIFIED'))) AS \"{c}\"")
         else:
             select_clean_items.append(f"COALESCE(CAST(\"{c}\" AS VARCHAR), '') AS \"{c}\"")
 

@@ -19,3 +19,5 @@ __pycache__/
 *.pyc
 
 minio_data/
+Check scripts/
+Trash/
