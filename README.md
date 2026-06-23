@@ -69,7 +69,7 @@ python -m venv venv
 source venv/bin/activate
 
 ```
-*(Note: Once successfully activated, your terminal prompt will display a (venv) prefix.)
+*Note: Once successfully activated, your terminal prompt will display a (venv) prefix.*
 
 ### Step 3: Install Python Dependencies
 
