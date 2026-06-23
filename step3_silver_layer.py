@@ -188,10 +188,10 @@ def process_dataset(dataset_name, bulk_filename, api_prefix):
         elif c == "trans_amt":
             select_clean_items.append("COALESCE(CAST(trans_amt AS DOUBLE), 0.0) AS trans_amt")
         elif c in ["cand_id", "com_id", "other_com_id", "sub_id"]:
-            # Data Quality: Rimozione spazi e formattazione rigorosa degli ID
+            # Data Quality: Remove spaces and rigorous ID formatting
             select_clean_items.append(f"TRIM(UPPER(COALESCE(CAST(\"{c}\" AS VARCHAR), ''))) AS \"{c}\"")
         elif c == "contrib_emp":
-            # Normalizzazione forte per i datori di lavoro (RIMOZIONE DOPPIONI E SPAZI)
+            # Strong standardization for employers (REMOVAL OF DUPLICATES AND SPACES)
             select_clean_items.append(f"TRIM(UPPER(COALESCE(CAST(\"{c}\" AS VARCHAR), 'NOT SPECIFIED'))) AS \"{c}\"")
         else:
             select_clean_items.append(f"COALESCE(CAST(\"{c}\" AS VARCHAR), '') AS \"{c}\"")
