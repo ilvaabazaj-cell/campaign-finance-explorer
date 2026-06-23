@@ -52,7 +52,7 @@ MINIO_SECRET_KEY=minioadmin
 
 ```
 
-*(Note: A template structure of this file can be referenced inside `.env.example` in the repository.)*
+*Note: A template structure of this file can be referenced inside `.env.example` in the repository.*
 
 ### Step 2: Initialize and activate a Virtual Envirorment
 
