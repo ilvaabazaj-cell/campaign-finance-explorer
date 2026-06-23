@@ -54,7 +54,24 @@ MINIO_SECRET_KEY=minioadmin
 
 *(Note: A template structure of this file can be referenced inside `.env.example` in the repository.)*
 
-### Step 2: Install Python Dependencies
+### Step 2: Initialize and activate a Virtual Envirorment
+
+It is highly recommended to isolate your project dependencies using a Python virtual environment to avoid conflicts with global packages.
+
+```bash
+# Create the virtual environment
+python -m venv venv
+
+# Activate on Windows:
+.\\venv\\Scripts\\activate
+
+# OR Activate on macOS/Linux:
+source venv/bin/activate
+
+```
+*(Note: Once successfully activated, your terminal prompt will display a (venv) prefix.)
+
+### Step 3: Install Python Dependencies
 
 Install the required packages using pip:
 
@@ -63,7 +80,7 @@ pip install -r requirements.txt
 
 ```
 
-### Step 3: Boot the Object Storage Infrastructure (Docker)
+### Step 4: Boot the Object Storage Infrastructure (Docker)
 
 Spin up the local containerized MinIO server in detached mode:
 
@@ -78,7 +95,7 @@ docker compose up -d
 
 ## ⚙️ Pipeline Deep Dive: Step-by-Step Execution
 
-### Step 4: Run the Ingestion Pipelines (Bronze Stage)
+### Step 5: Run the Ingestion Pipelines (Bronze Stage)
 
 This stage initializes our raw object storage environment and executes our dual-mode extraction strategies (combining historical block downloads with real-time API polling).
 
@@ -115,7 +132,7 @@ python step2_api_ingest.py
 
 ---
 
-### Step 5: Execute Schema Unification and Data Cleansing (Silver Stage)
+### Step 6: Execute Schema Unification and Data Cleansing (Silver Stage)
 
 This step takes the multi-structured, disparate raw inputs and prepares them for formal database querying.
 
@@ -135,7 +152,7 @@ python step3_silver_layer.py
 
 ---
 
-### Step 6: Generate Specialized Analytical Tables (Gold Stage)
+### Step 7: Generate Specialized Analytical Tables (Gold Stage)
 
 This step converts our cleaned historical rows into pre-computed data structures configured specifically for dashboard rendering.
 
@@ -162,7 +179,7 @@ python step4_gold_layer.py
 
 ---
 
-### Step 7: Launch the Campaign Finance Explorer Dashboard
+### Step 8: Launch the Campaign Finance Explorer Dashboard
 
 With all the computational heavy lifting safely handled by your data lake pipeline, launch the user interface:
 
@@ -175,3 +192,28 @@ Once initialized, open your web browser and navigate to the local interface addr
 👉 **[http://localhost:8501](http://localhost:8501)**
 
 * **Technical Design Breakdown:** By keeping your application stack serverless, you do not need heavy database server containers running. DuckDB runs embedded inside the application process itself. The user interface leverages Streamlit's `@st.cache_data` optimization decorator. This caches the pre-computed Gold tables into local memory on launch, ensuring that adjustments to your dropdown menus and map filters render instantly without triggering slow, repetitive file scans.
+
+
+
+---
+
+### 🛑 Graceful Shutdown & Teardown
+
+Once you are finished exploring the data and wish to close the environment, follow these steps to securely shut down the architecture and free up system resources:
+
+1. Stop the Dashboard: In the terminal running Streamlit, press Ctrl + C to terminate the user interface process.
+
+2. Spin Down the Data Lake: Shut down the MinIO container and remove the active Docker network:
+
+```bash
+docker compose down
+
+```
+
+3. Deactivate the Virtual Environment: Exit your isolated Python workspace to return to your global system environment:
+
+```bash
+deactivate
+
+```
+* **Technical Design Breakdown:** Running `docker compose down` gracefully stops the active container but safely preserves your MinIO configurations and processed database files physically mapped to your host machine's `minio_data` folder. You can safely boot the system back up anytime without losing your Gold layer aggregations!
