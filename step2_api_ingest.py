@@ -5,7 +5,10 @@ from datetime import datetime
 from dotenv import load_dotenv
 from minio import Minio
 import time
+import psutil
 
+
+start_time = time.time()
 # Load variables from the .env file
 load_dotenv()
 
@@ -164,3 +167,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+end_time = time.time()
+runtime_seconds = end_time - start_time
+
+print(f"⏱️ Runtime: {runtime_seconds:.2f} seconds")
+
+# Capture peak memory footprint (Resident Set Size) of the process
+process = psutil.Process(os.getpid())
+peak_memory_bytes = process.memory_info().peak_wset  # Works perfectly on Windows
+# If running on Linux/Mac, use: peak_memory_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+
+peak_memory_mb = peak_memory_bytes / (1024 * 1024)
+print(f"\n📊 [MEMORY PROFILE]: Peak RAM consumption: {peak_memory_mb:.2f} MB")

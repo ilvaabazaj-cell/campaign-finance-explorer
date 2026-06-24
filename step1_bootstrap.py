@@ -1,7 +1,10 @@
 import os
 from minio import Minio
 from minio.error import S3Error
+import time
+import psutil
 
+start_time = time.time()
 def main():
     # 1. Connect to the local MinIO storage container
     print("📡 Connecting to MinIO data lake container...")
@@ -31,3 +34,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+end_time = time.time()
+runtime_seconds = end_time - start_time
+
+print(f"⏱️ Runtime: {runtime_seconds:.2f} seconds")
+
+process = psutil.Process(os.getpid())
+peak_memory_bytes = process.memory_info().peak_wset
+peak_memory_mb = peak_memory_bytes / (1024 * 1024)
+print(f"\n📊 [MEMORY PROFILE]: Peak RAM consumption: {peak_memory_mb:.2f} MB")

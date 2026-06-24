@@ -4,7 +4,10 @@ import duckdb
 import pandas as pd
 from minio import Minio
 from dotenv import load_dotenv
+import time
+import psutil
 
+start_time = time.time()
 # Load environment variables from the .env file
 load_dotenv()
 
@@ -52,8 +55,8 @@ MAPPINGS = {
         "api": {"committee_id": "com_id", "candidate_id": "cand_id", "election_type_full": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "recipient_name": "entity_name", "recipient_city": "contrib_city", "recipient_state": "contrib_state", "recipient_zip": "contrib_zip", "disbursement_date": "trans_date", "disbursement_amount": "trans_amt", "recipient_committee_id": "other_com_id", "transaction_id": "sub_id"}
     },
     "independent_expenditures": {
-        "bulk": {"CMTE_ID": "com_id", "TRANSACTION_PGI": "election_type", "TRANSACTION_TP": "trans_type", "ENTITY_TP": "entity_tp", "NAME": "entity_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id", "SUB_ID": "sub_id"},
-        "api": {"committee_id": "com_id", "election_type_full": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "contributor_name": "entity_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt", "contributor_id": "other_com_id", "transaction_id": "sub_id"}
+        "bulk": {"CMTE_ID": "com_id", "TRANSACTION_PGI": "election_type", "TRANSACTION_TP": "trans_type", "ENTITY_TP": "entity_tp", "NAME": "entity_name", "CITY": "contrib_city", "STATE": "contrib_state", "ZIP_CODE": "contrib_zip", "TRANSACTION_DT": "trans_date", "TRANSACTION_AMT": "trans_amt", "OTHER_ID": "other_com_id", "CAND_ID": "cand_id", "SUB_ID": "sub_id"},
+        "api": {"committee_id": "com_id", "election_type_full": "election_type", "transaction_type": "trans_type", "entity_type": "entity_tp", "contributor_name": "entity_name", "contributor_city": "contrib_city", "contributor_state": "contrib_state", "contributor_zip": "contrib_zip", "contribution_receipt_date": "trans_date", "contribution_receipt_amount": "trans_amt", "contributor_id": "other_com_id", "candidate_id": "cand_id", "transaction_id": "sub_id"}
     },
     "pac_summary": {
         "bulk": {"CMTE_ID": "com_id", "TTL_RECEIPTS": "total_receipts", "INDV_CONTRIB": "total_indv_contrib", "OTHER_POL_CMTE_CONTRIB": "total_pac_contrib", "TTL_DISB": "total_disbursements", "COH_COP": "cash_on_hand", "IND_EXP": "independent_exp", "NET_CONTRIB": "net_contrib", "CVG_END_DT": "coverage_end_date"},
@@ -175,6 +178,13 @@ def process_dataset(dataset_name, bulk_filename, api_prefix):
 
     con.execute(f"CREATE VIEW unified_raw AS {union_query}")
     
+    # Isolate rows to avoid cross-table duplication between shared itpas2 source files
+    filter_clause = "WHERE 1=1"
+    if dataset_name == "committee_contributions_to_candidates":
+        filter_clause = "WHERE trans_type = '24K'"
+    elif dataset_name == "independent_expenditures":
+        filter_clause = "WHERE trans_type IN ('24E', '24A')"
+
     select_clean_items = []
     for c in all_target_columns:
         if c == "trans_date":
@@ -198,14 +208,15 @@ def process_dataset(dataset_name, bulk_filename, api_prefix):
 
     select_clean_clause = ", ".join(select_clean_items)
 
-    print("   🛡️ Unifying schemas and executing deduplication out-of-core...")
+    print(f"   🛡️ Unifying schemas and executing deduplication + code separation ({filter_clause})...")
     
     con.execute(f"""
         COPY (
-            SELECT DISTINCT {select_clean_clause} FROM unified_raw
+            SELECT DISTINCT {select_clean_clause} 
+            FROM unified_raw
+            {filter_clause}
         ) TO '{local_temp_path}' (FORMAT PARQUET, COMPRESSION 'SNAPPY')
     """)
-
     # -------------------------------------------------------------------------
     # STEP D: COMMIT TO MINIO FOR USER INTERFACE DISPLAY
     # -------------------------------------------------------------------------
@@ -236,3 +247,16 @@ if __name__ == "__main__":
     for dataset_name, bulk_file, api_prefix in pipeline_tasks:
         process_dataset(dataset_name, bulk_file, api_prefix)
     print("\n🏁 Universal Silver Layer Execution Completed successfully!")
+
+end_time = time.time()
+runtime_seconds = end_time - start_time
+
+print(f"⏱️ Runtime: {runtime_seconds:.2f} seconds")
+
+# Capture peak memory footprint (Resident Set Size) of the process
+process = psutil.Process(os.getpid())
+peak_memory_bytes = process.memory_info().peak_wset  # Works perfectly on Windows
+# If running on Linux/Mac, use: peak_memory_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+
+peak_memory_mb = peak_memory_bytes / (1024 * 1024)
+print(f"\n📊 [MEMORY PROFILE]: Peak RAM consumption: {peak_memory_mb:.2f} MB")

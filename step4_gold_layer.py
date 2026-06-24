@@ -2,7 +2,10 @@
 import os
 import duckdb
 from dotenv import load_dotenv
+import time
+import psutil
 
+start_time = time.time()
 load_dotenv()
 
 def build_gold_layer():
@@ -45,8 +48,7 @@ def build_gold_layer():
             print(f"❌ Failed to link {view_name}: {e}")
             return
 
-    # --- BASE CLEAN VIEW FOR CANDIDATES (Fixes image_175a79.png) ---
-    # This regex extracts numbers from brackets, splits them into individual rows, and filters out odd years
+    # --- BASE CLEAN VIEW FOR CANDIDATES ---
     con.execute("""
         CREATE VIEW clean_candidates_base AS
         SELECT 
@@ -58,7 +60,7 @@ def build_gold_layer():
         WHERE cand_el_yr IS NOT NULL AND cand_el_yr != ''
     """)
 
-    # --- METRIC 1: GEOGRAPHIC DISTRIBUTION ---
+    # --- METRIC 1: GEOGRAPHIC DISTRIBUTION (Protected with ABS) ---
     print("📊 Computing Geographic Distribution Table...")
     con.execute("""
         CREATE TABLE geo_summary AS
@@ -68,18 +70,18 @@ def build_gold_layer():
             c.cand_off AS office_type,
             c.election_cycle::VARCHAR AS election_cycle,
             i.contrib_state AS state,
-            SUM(CAST(i.trans_amt AS DOUBLE)) AS total_amount,
+            ABS(SUM(CAST(i.trans_amt AS DOUBLE))) AS total_amount,
             COUNT(*) AS total_donations
         FROM silver_individual_contributions i
         JOIN silver_committee_master cm ON i.com_id = cm.com_id
         JOIN clean_candidates_base c ON cm.cand_id = c.cand_id
         WHERE i.contrib_state IS NOT NULL AND i.contrib_state != ''
-          AND c.election_cycle % 2 = 0 -- Keep only standard even-year cycles
+          AND c.election_cycle % 2 = 0 
         GROUP BY 1, 2, 3, 4, 5
     """)
     con.execute(f"COPY geo_summary TO '{os.path.join(gold_dir, 'gold_candidate_geo_summary.parquet')}' (FORMAT PARQUET)")
 
-    # --- METRIC 2: DONOR TYPE BREAKDOWN ---
+    # --- METRIC 2: DONOR TYPE BREAKDOWN (Floored to prevent negative sums) ---
     print("📊 Computing Donor Type Breakdowns...")
     con.execute("""
         CREATE TABLE donor_type_summary AS
@@ -102,8 +104,8 @@ def build_gold_layer():
             c.cand_id,
             c.cand_name,
             c.election_cycle::VARCHAR AS election_cycle,
-            COALESCE(i.individual_funds, 0.0) AS individual_funds,
-            COALESCE(cm.committee_funds, 0.0) AS committee_funds
+            GREATEST(COALESCE(i.individual_funds, 0.0), 0.0) AS individual_funds,
+            GREATEST(COALESCE(cm.committee_funds, 0.0), 0.0) AS committee_funds
         FROM clean_candidates_base c
         LEFT JOIN indiv_agg i ON c.cand_id = i.cand_id
         LEFT JOIN comm_agg cm ON c.cand_id = cm.cand_id
@@ -112,7 +114,7 @@ def build_gold_layer():
     """)
     con.execute(f"COPY donor_type_summary TO '{os.path.join(gold_dir, 'gold_donor_type_summary.parquet')}' (FORMAT PARQUET)")
 
-    # --- METRIC 3: NETWORK ANALYSIS METRICS ---
+    # --- METRIC 3: NETWORK ANALYSIS METRICS (Protected with ABS for valid Sizing) ---
     print("🕸️ Compiling Comprehensive Network Analysis Metrics...")
     con.execute("""
         CREATE TABLE network_metrics AS
@@ -122,7 +124,7 @@ def build_gold_layer():
             c.cand_name AS target_node,
             'Direct Campaign Contribution' AS transaction_flow,
             c.election_cycle::VARCHAR AS election_cycle,
-            SUM(CAST(i.trans_amt AS DOUBLE)) AS weight,
+            ABS(SUM(CAST(i.trans_amt AS DOUBLE))) AS weight,
             COUNT(*) AS transaction_count
         FROM silver_individual_contributions i
         JOIN silver_committee_master cm ON i.com_id = cm.com_id
@@ -139,7 +141,7 @@ def build_gold_layer():
             c.cand_name AS target_node,
             'PAC to Candidate Contribution' AS transaction_flow,
             c.election_cycle::VARCHAR AS election_cycle,
-            SUM(CAST(cc.trans_amt AS DOUBLE)) AS weight,
+            ABS(SUM(CAST(cc.trans_amt AS DOUBLE))) AS weight,
             COUNT(*) AS transaction_count
         FROM silver_committee_contributions_to_candidates cc
         JOIN silver_committee_master cm ON cc.com_id = cm.com_id
@@ -154,8 +156,8 @@ def build_gold_layer():
             'Committee/PAC' AS source_type,
             tgt.com_name AS target_node,
             'Inter-PAC Transfer' AS transaction_flow,
-            '2026' AS election_cycle, -- Fallback cycle for basic inter-committee movements
-            SUM(CAST(ic.trans_amt AS DOUBLE)) AS weight,
+            '2026' AS election_cycle, 
+            ABS(SUM(CAST(ic.trans_amt AS DOUBLE))) AS weight,
             COUNT(*) AS transaction_count
         FROM silver_inter_committee_transactions ic
         JOIN silver_committee_master src ON ic.com_id = src.com_id
@@ -171,11 +173,11 @@ def build_gold_layer():
             c.cand_name AS target_node,
             'Independent Expenditure (IE)' AS transaction_flow,
             c.election_cycle::VARCHAR AS election_cycle,
-            SUM(CAST(ie.trans_amt AS DOUBLE)) AS weight,
+            ABS(SUM(CAST(ie.trans_amt AS DOUBLE))) AS weight,
             COUNT(*) AS transaction_count
         FROM silver_independent_expenditures ie
         JOIN silver_committee_master cm ON ie.com_id = cm.com_id
-        JOIN clean_candidates_base c ON ie.other_com_id = c.cand_id
+        JOIN clean_candidates_base c ON ie.cand_id = c.cand_id
         WHERE c.election_cycle % 2 = 0
         GROUP BY 1, 2, 3, 4, 5
     """)
@@ -185,3 +187,12 @@ def build_gold_layer():
 
 if __name__ == "__main__":
     build_gold_layer()
+
+end_time = time.time()
+runtime_seconds = end_time - start_time
+print(f"⏱️ Runtime: {runtime_seconds:.2f} seconds")
+
+process = psutil.Process(os.getpid())
+peak_memory_bytes = process.memory_info().peak_wset
+peak_memory_mb = peak_memory_bytes / (1024 * 1024)
+print(f"\n📊 [MEMORY PROFILE]: Peak RAM consumption: {peak_memory_mb:.2f} MB")
